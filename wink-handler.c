@@ -10,8 +10,18 @@
 
 #include <MQTTClient.h>
 
-#define MQTT_HOST "hostname"
-#define MQTT_PORT 1833
+#include "ini.h"
+
+struct configuration {
+	char *username;
+	char *password;
+	char *host;
+	char *clientid;
+	char *topic_prefix;
+	int port;
+};
+
+static struct configuration config;
 
 void handle_relay1(MessageData *md)
 {
@@ -55,7 +65,12 @@ int mqtt_connect(Network *n, MQTTClient *c, char *buf, char *readbuf) {
 
 	NetworkInit(n);
 
-	ret = NetworkConnect(n, MQTT_HOST, MQTT_PORT);
+	if (config.host == NULL || config.port == 0) {
+		fprintf(stderr, "No valid configuration\n");
+		return 1;
+	}
+
+	ret = NetworkConnect(n, config.host, config.port);
 	if (ret < 0)
 		return ret;
 
@@ -63,15 +78,43 @@ int mqtt_connect(Network *n, MQTTClient *c, char *buf, char *readbuf) {
 
 	data.willFlag = 0;
 	data.MQTTVersion = 4;
-	data.clientID.cstring = "Wink_Relay";
+	if (config.clientid != NULL) {
+		data.clientID.cstring = config.clientid;
+	} else {
+		data.clientID.cstring = "Wink_Relay";
+	}
 	data.keepAliveInterval = 10;
 	data.cleansession = 1;
-	
+	if (config.username != NULL) {
+		data.username.cstring = config.username;
+	}
+	if (config.password != NULL) {
+		data.password.cstring = config.password;
+	}
 	ret = MQTTConnect(c, &data);
 	if (ret < 0)
 		return ret;
 
 	return 0;
+}
+
+static int config_handler(void* data, const char* section, const char* name,
+			  const char* value)
+{
+	if (strcmp(name, "user") == 0) {
+		config.username = strdup(value);
+	} else if (strcmp(name, "password") == 0) {
+		config.password = strdup(value);
+	} else if (strcmp(name, "clientid") == 0) {
+		config.clientid = strdup(value);
+	} else if (strcmp(name, "topic_prefix") == 0) {
+		config.topic_prefix = strdup(value);
+	} else if (strcmp(name, "host") == 0) {
+		config.host = strdup(value);
+	} else if (strcmp(name, "port") == 0) {
+		config.port = atoi(value);
+	}
+	return 1;
 }
 
 int main() {
@@ -94,6 +137,18 @@ int main() {
 	MQTTClient c;
 	MQTTMessage message;
 	struct rlimit limits;
+	char *prefix, topic[1024];
+
+	if (ini_parse("/sdcard/mqtt.ini", config_handler, NULL) < 0) {
+		printf("Can't load /sdcard/mqtt.ini\n");
+		return 1;
+	}
+
+	if (config.topic_prefix != NULL) {
+		prefix = config.topic_prefix;
+	} else {
+		prefix = strdup("Relay");
+	}
 
 	uswitch = open("/sys/class/gpio/gpio8/value", O_RDONLY);
 	lswitch = open("/sys/class/gpio/gpio7/value", O_RDONLY);
@@ -117,8 +172,10 @@ int main() {
 	while (mqtt_connect(&n, &c, buf, readbuf) < 0)
 		sleep(10);
 
-	MQTTSubscribe(&c, "Relay/relays/upper", 0, handle_relay1);
-	MQTTSubscribe(&c, "Relay/relays/lower", 0, handle_relay2);
+	sprintf(topic, "%s/relays/upper", prefix);
+	MQTTSubscribe(&c, topic, 0, handle_relay1);
+	sprintf(topic, "%s/relays/lower", prefix);
+	MQTTSubscribe(&c, topic, 0, handle_relay2);
 
 	while (1) {
 		lseek(relay1, 0, SEEK_SET);
@@ -132,7 +189,8 @@ int main() {
 				sprintf(payload, "ON");
 			}
 			message.payloadlen = strlen(payload);
-			MQTTPublish(&c, "Relay/relays/upper_state", &message);
+			sprintf(topic, "%s/relays/upper_state", prefix);
+			MQTTPublish(&c, topic, &message);
 			urelaystate = buffer[0];
 		}
 
@@ -147,7 +205,8 @@ int main() {
 				sprintf(payload, "ON");
 			}
 			message.payloadlen = strlen(payload);
-			MQTTPublish(&c, "Relay/relays/lower_state", &message);
+			sprintf(topic, "%s/relays/lower_state", prefix);
+			MQTTPublish(&c, topic, &message);
 			lrelaystate = buffer[0];
 		}
 
@@ -159,7 +218,8 @@ int main() {
 			message.payload = payload;
 			sprintf(payload, "on");
 			message.payloadlen = strlen(payload);
-			MQTTPublish(&c, "Relay/switches/upper", &message);
+			sprintf(topic, "%s/switches/upper", prefix);
+			MQTTPublish(&c, topic, &message);
 		} else if (buffer[0] == '1' && uswitchstate == 0) {
 			uswitchstate = 1;
 		}
@@ -171,7 +231,8 @@ int main() {
 			message.payload = payload;
 			sprintf(payload, "on");
 			message.payloadlen = strlen(payload);
-			MQTTPublish(&c, "Relay/switches/lower", &message);
+			sprintf(topic, "%s/switches/lower", prefix);
+			MQTTPublish(&c, topic, &message);
 		} else if (buffer[0] == '1' && lswitchstate == 0) {
 			lswitchstate = 1;
 		}
@@ -184,7 +245,8 @@ int main() {
 			message.payload = payload;
 			sprintf(payload, "%f", temperature/1000.0);
 			message.payloadlen = strlen(payload);
-			MQTTPublish(&c, "Relay/sensors/temperature", &message);
+			sprintf(topic, "%s/sensors/temperature", prefix);
+			MQTTPublish(&c, topic, &message);
 			last_temperature = temperature;
 		}
 
@@ -196,7 +258,8 @@ int main() {
 			message.payload = payload;
 			sprintf(payload, "%f", humidity/1000.0);
 			message.payloadlen = strlen(payload);
-			MQTTPublish(&c, "Relay/sensors/humidity", &message);
+			sprintf(topic, "%s/sensors/humidity", prefix);
+			MQTTPublish(&c, topic, &message);
 			last_humidity = humidity;
 		}
 
